@@ -1,0 +1,17 @@
+# Environment
+backend/.env
+frontend/.env
+
+# Dependencies
+node_modules/
+*/node_modules/
+
+# Docker
+.docker/
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS
+.DS_Store
