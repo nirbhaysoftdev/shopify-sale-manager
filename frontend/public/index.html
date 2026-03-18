@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Sale Campaign Manager</title>
+    <script>
+      // Skip ngrok warning by setting header via fetch
+      if (window.location.hostname.includes('ngrok')) {
+        fetch(window.location.href, {
+          headers: { 'ngrok-skip-browser-warning': 'true' }
+        });
+      }
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+  </body>
+</html>
