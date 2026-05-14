@@ -1,13 +1,35 @@
+html, body, #root {
+  height: 100%;
+}
+
 body {
   margin: 0;
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
-    'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
-    sans-serif;
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto',
+    'Helvetica Neue', sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  background: var(--p-color-bg-app, #f6f6f7);
+  color: var(--p-color-text, #202223);
 }
 
 code {
-  font-family: source-code-pro, Menlo, Monaco, Consolas, 'Courier New',
-    monospace;
+  font-family: source-code-pro, Menlo, Monaco, Consolas, 'Courier New', monospace;
+}
+
+/* Subtle focus ring polish on raw checkbox inputs we still use */
+input[type="checkbox"]:focus-visible {
+  outline: 2px solid var(--p-color-border-focus, #005bd3);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* Smooth row hover for DataTable rows */
+.Polaris-DataTable__TableRow:hover td {
+  background: var(--p-color-bg-surface-hover, rgba(0, 0, 0, 0.025));
+  transition: background 120ms ease;
+}
+
+/* Tighten Polaris Page top spacing so the hero feels more deliberate */
+.Polaris-Page-Header {
+  padding-bottom: 8px;
 }

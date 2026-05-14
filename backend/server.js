@@ -11,9 +11,7 @@ const runMigrations = require("./db/migrations");
 
 const app = express();
 
-// Skip ngrok warning on ALL requests
 app.use((req, res, next) => {
-  req.headers["ngrok-skip-browser-warning"] = "true";
   res.setHeader("ngrok-skip-browser-warning", "true");
   next();
 });
@@ -26,8 +24,11 @@ app.use(cors({
 
 app.use(express.json());
 
-// Auth routes
+// Routes
 app.use("/auth", require("./routes/authRoutes"));
+app.use("/api/products", require("./routes/productRoutes"));
+app.use("/api/collections", require("./routes/collectionRoutes"));
+app.use("/api/campaigns", require("./routes/campaignRoutes"));
 
 // Health check
 app.get("/api/health", (req, res) => {
@@ -40,7 +41,7 @@ app.get("/api/health", (req, res) => {
 
 // Proxy everything else to frontend
 app.use("/", createProxyMiddleware({
-  target: "http://frontend:3000",
+  target: process.env.FRONTEND_URL || "http://localhost:3000",
   changeOrigin: true,
   ws: true,
   on: {

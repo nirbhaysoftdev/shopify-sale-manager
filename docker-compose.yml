@@ -1,8 +1,5 @@
-version: '3.8'
-
 services:
 
-  # MySQL Database
   mysql:
     image: mysql:8.0
     container_name: sale_manager_mysql
@@ -19,7 +16,6 @@ services:
     networks:
       - sale_network
 
-  # Redis
   redis:
     image: redis:7-alpine
     container_name: sale_manager_redis
@@ -31,7 +27,6 @@ services:
     networks:
       - sale_network
 
-  # Backend
   backend:
     build:
       context: ./backend
@@ -50,8 +45,10 @@ services:
       - /app/node_modules
     networks:
       - sale_network
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
 
-  # Worker (BullMQ)
   worker:
     build:
       context: ./backend
@@ -69,8 +66,10 @@ services:
       - /app/node_modules
     networks:
       - sale_network
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
 
-  # Frontend
   frontend:
     build:
       context: ./frontend

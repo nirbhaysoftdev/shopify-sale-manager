@@ -28,13 +28,14 @@ router.get("/callback", async (req, res) => {
 
     const session = callback.session;
     console.log("✅ OAuth Success for shop:", session.shop);
-    console.log("✅ Access Token:", session.accessToken);
+    console.log("✅ Access Token saved to MySQL");
+
+    // Save session to MySQL
+    await shopify.config.sessionStorage.storeSession(session);
 
     // Redirect to frontend
     const host = req.query.host;
-    res.redirect(
-      `https://13ae-2409-40e5-210d-2e34-b8c3-7d28-1f8f-23c9.ngrok-free.app/frontend?shop=${session.shop}&host=${host}`
-    );
+    res.redirect(`/?shop=${session.shop}&host=${host}`);
 
   } catch (error) {
     console.error("❌ Auth callback error:", error.message);
