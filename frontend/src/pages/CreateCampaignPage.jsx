@@ -5,7 +5,7 @@ import {
   Select, Banner, Spinner, Badge, Layout,
   Text, BlockStack, InlineStack, Pagination,
   Thumbnail, Checkbox, RadioButton, Box, Divider,
-  EmptyState, InlineGrid
+  EmptyState, InlineGrid, Tooltip
 } from "@shopify/polaris";
 import { BACKEND_URL, SHOP } from "../App";
 
@@ -35,10 +35,51 @@ export default function CreateCampaignPage() {
   const [cursorStack, setCursorStack] = useState([]);
   const [selectedVariants, setSelectedVariants] = useState([]);
 
+  // variant_id -> { campaign_id, campaign_name, start_time, end_time }
+  const [conflicts, setConflicts] = useState({});
+  const [conflictsLoading, setConflictsLoading] = useState(false);
+
   useEffect(() => {
     fetchCollections();
     fetchProducts(null);
   }, []);
+
+  // Re-check conflicts whenever the schedule changes. Debounce so each keystroke
+  // in the datetime field doesn't hit the API.
+  useEffect(() => {
+    if (!startTime || (hasEndTime && !endTime)) {
+      setConflicts({});
+      return;
+    }
+    const controller = new AbortController();
+    const t = setTimeout(async () => {
+      setConflictsLoading(true);
+      try {
+        const params = new URLSearchParams({ shop: SHOP, start: startTime });
+        if (hasEndTime && endTime) params.append("end", endTime);
+        const res = await fetch(`${BACKEND_URL}/api/campaigns/conflicts?${params}`, {
+          signal: controller.signal,
+        });
+        const data = await res.json();
+        const map = {};
+        (data.conflicts || []).forEach(c => { map[c.variant_id] = c; });
+        setConflicts(map);
+      } catch (err) {
+        if (err.name !== "AbortError") console.error("Failed to fetch conflicts", err);
+      } finally {
+        setConflictsLoading(false);
+      }
+    }, 300);
+    return () => { clearTimeout(t); controller.abort(); };
+  }, [startTime, endTime, hasEndTime]);
+
+  // Drop any selected variants that became conflicting after a schedule change.
+  useEffect(() => {
+    setSelectedVariants(prev => {
+      const filtered = prev.filter(v => !conflicts[v.id]);
+      return filtered.length === prev.length ? prev : filtered;
+    });
+  }, [conflicts]);
 
   useEffect(() => {
     setCursor(null);
@@ -94,6 +135,7 @@ export default function CreateCampaignPage() {
   }
 
   function toggleVariant(variantId, productTitle, variantTitle, price) {
+    if (conflicts[variantId]) return;
     setSelectedVariants(prev => {
       const exists = prev.find(v => v.id === variantId);
       if (exists) return prev.filter(v => v.id !== variantId);
@@ -103,12 +145,14 @@ export default function CreateCampaignPage() {
 
   function selectAllOnPage() {
     const pageVariants = products.flatMap(p =>
-      p.variants.map(v => ({
-        id: v.id,
-        productTitle: p.title,
-        variantTitle: v.title,
-        price: v.price
-      }))
+      p.variants
+        .filter(v => !conflicts[v.id])
+        .map(v => ({
+          id: v.id,
+          productTitle: p.title,
+          variantTitle: v.title,
+          price: v.price
+        }))
     );
     setSelectedVariants(prev => {
       const existingIds = prev.map(v => v.id);
@@ -190,51 +234,86 @@ export default function CreateCampaignPage() {
     );
   };
 
+  const conflictCountOnPage = products.reduce(
+    (n, p) => n + p.variants.filter(v => conflicts[v.id]).length,
+    0
+  );
+
   const rows = products.flatMap(product =>
     product.variants.map(variant => {
       const isSelected = !!selectedVariants.find(v => v.id === variant.id);
+      const conflict = conflicts[variant.id];
+      const dim = (node) =>
+        conflict ? <div style={{ opacity: 0.45 }}>{node}</div> : node;
+      const conflictLabel = conflict
+        ? `Booked in “${conflict.campaign_name}” (${new Date(conflict.start_time).toLocaleDateString("en-GB")}${conflict.end_time ? ` – ${new Date(conflict.end_time).toLocaleDateString("en-GB")}` : " – no end"})`
+        : null;
+
       return [
-        <input
-          type="checkbox"
-          checked={isSelected}
-          onChange={() => toggleVariant(variant.id, product.title, variant.title, variant.price)}
-          style={{ cursor: "pointer", width: "16px", height: "16px", accentColor: "#005bd3" }}
-        />,
-        <InlineStack gap="300" blockAlign="center" wrap={false}>
-          {product.image ? (
-            <Thumbnail source={product.image} alt={product.title} size="small" />
-          ) : (
-            <Box
-              background="bg-surface-secondary"
-              borderRadius="200"
-              minWidth="40px"
-              minHeight="40px"
+        conflict ? (
+          <Tooltip content={conflictLabel}>
+            <input
+              type="checkbox"
+              checked={false}
+              disabled
+              readOnly
+              style={{ cursor: "not-allowed", width: "16px", height: "16px" }}
             />
-          )}
-          <BlockStack gap="050">
-            <Text variant="bodyMd" fontWeight="semibold">{product.title}</Text>
-            <InlineStack gap="100">
-              <Badge tone={product.status === "ACTIVE" ? "success" : "info"} size="small">
-                {product.status === "ACTIVE" ? "Active" : "Draft"}
-              </Badge>
-            </InlineStack>
-          </BlockStack>
-        </InlineStack>,
-        <Text variant="bodyMd" tone={variant.title === "Default Title" ? "subdued" : undefined}>
-          {variant.title === "Default Title" ? "—" : variant.title}
-        </Text>,
-        <Text variant="bodySm" tone="subdued">{variant.sku || "—"}</Text>,
-        <Text variant="bodyMd">£{variant.price}</Text>,
-        isSelected
-          ? (
+          </Tooltip>
+        ) : (
+          <input
+            type="checkbox"
+            checked={isSelected}
+            onChange={() => toggleVariant(variant.id, product.title, variant.title, variant.price)}
+            style={{ cursor: "pointer", width: "16px", height: "16px", accentColor: "#005bd3" }}
+          />
+        ),
+        dim(
+          <InlineStack gap="300" blockAlign="center" wrap={false}>
+            {product.image ? (
+              <Thumbnail source={product.image} alt={product.title} size="small" />
+            ) : (
+              <Box
+                background="bg-surface-secondary"
+                borderRadius="200"
+                minWidth="40px"
+                minHeight="40px"
+              />
+            )}
             <BlockStack gap="050">
-              <Text variant="bodyMd" tone="success" fontWeight="semibold">£{calculateSalePrice(variant.price)}</Text>
-              <Text variant="bodySm" tone="subdued">
-                <span style={{ textDecoration: "line-through" }}>£{variant.price}</span>
-              </Text>
+              <Text variant="bodyMd" fontWeight="semibold">{product.title}</Text>
+              <InlineStack gap="100">
+                <Badge tone={product.status === "ACTIVE" ? "success" : "info"} size="small">
+                  {product.status === "ACTIVE" ? "Active" : "Draft"}
+                </Badge>
+                {conflict && (
+                  <Tooltip content={conflictLabel}>
+                    <Badge tone="warning" size="small">In another campaign</Badge>
+                  </Tooltip>
+                )}
+              </InlineStack>
             </BlockStack>
-          )
-          : <Text tone="subdued">—</Text>
+          </InlineStack>
+        ),
+        dim(
+          <Text variant="bodyMd" tone={variant.title === "Default Title" ? "subdued" : undefined}>
+            {variant.title === "Default Title" ? "—" : variant.title}
+          </Text>
+        ),
+        dim(<Text variant="bodySm" tone="subdued">{variant.sku || "—"}</Text>),
+        dim(<Text variant="bodyMd">£{variant.price}</Text>),
+        dim(
+          isSelected
+            ? (
+              <BlockStack gap="050">
+                <Text variant="bodyMd" tone="success" fontWeight="semibold">£{calculateSalePrice(variant.price)}</Text>
+                <Text variant="bodySm" tone="subdued">
+                  <span style={{ textDecoration: "line-through" }}>£{variant.price}</span>
+                </Text>
+              </BlockStack>
+            )
+            : <Text tone="subdued">—</Text>
+        )
       ];
     })
   );
@@ -333,112 +412,6 @@ export default function CreateCampaignPage() {
               </BlockStack>
             </Card>
 
-            <Card padding="0">
-              <Box padding="400">
-                <SectionHeader
-                  step="04"
-                  title="Products and variants"
-                  hint="Pick which variants this discount applies to. Pricing previews update live."
-                />
-              </Box>
-              <Divider />
-              <Box padding="400">
-                <BlockStack gap="400">
-                  <InlineGrid columns={{ xs: 1, md: 2 }} gap="400">
-                    <Select
-                      label="Filter by collection"
-                      options={collectionOptions}
-                      value={selectedCollection}
-                      onChange={val => {
-                        setSelectedCollection(val);
-                        setCursor(null);
-                        setCursorStack([]);
-                      }}
-                    />
-                    <TextField
-                      label="Search products"
-                      value={searchInput}
-                      onChange={setSearchInput}
-                      placeholder="Search by product name…"
-                      autoComplete="off"
-                      connectedRight={
-                        <Button onClick={() => setSearch(searchInput)}>Search</Button>
-                      }
-                    />
-                  </InlineGrid>
-
-                  <InlineStack gap="400" align="space-between" blockAlign="center" wrap>
-                    <Checkbox
-                      label="Show active products only"
-                      checked={!showDraft}
-                      onChange={(val) => setShowDraft(!val)}
-                    />
-                    <InlineStack gap="200">
-                      {search && (
-                        <Button size="slim" onClick={() => { setSearch(""); setSearchInput(""); }}>
-                          Clear search
-                        </Button>
-                      )}
-                      <Button size="slim" onClick={selectAllOnPage}>
-                        Select all on this page
-                      </Button>
-                    </InlineStack>
-                  </InlineStack>
-
-                  {loading ? (
-                    <Box padding="1600">
-                      <BlockStack gap="200" align="center" inlineAlign="center">
-                        <Spinner />
-                        <Text tone="subdued">Loading products…</Text>
-                      </BlockStack>
-                    </Box>
-                  ) : rows.length === 0 ? (
-                    <EmptyState
-                      heading="No products to show"
-                      image="https://cdn.shopify.com/s/files/1/0262/4071/2726/files/emptystate-files.png"
-                    >
-                      <p>Try a different collection, clear the search, or include draft products.</p>
-                    </EmptyState>
-                  ) : (
-                    <BlockStack gap="300">
-                      <DataTable
-                        columnContentTypes={["text", "text", "text", "text", "text", "text"]}
-                        headings={[
-                          "",
-                          "Product",
-                          "Variant",
-                          "SKU",
-                          "Original",
-                          discountType === "percentage"
-                            ? `Sale (${discountValue || 0}% off)`
-                            : `Sale (£${discountValue || 0} off)`
-                        ]}
-                        rows={rows}
-                        increasedTableDensity
-                      />
-                      <InlineStack align="center">
-                        <Pagination
-                          hasPrevious={cursorStack.length > 0}
-                          onPrevious={() => {
-                            const newStack = [...cursorStack];
-                            const prev = newStack.pop();
-                            setCursorStack(newStack);
-                            setCursor(prev);
-                            fetchProducts(prev);
-                          }}
-                          hasNext={pageInfo?.hasNextPage}
-                          onNext={() => {
-                            setCursorStack(prev => [...prev, cursor]);
-                            setCursor(pageInfo.endCursor);
-                            fetchProducts(pageInfo.endCursor);
-                          }}
-                        />
-                      </InlineStack>
-                    </BlockStack>
-                  )}
-                </BlockStack>
-              </Box>
-            </Card>
           </BlockStack>
         </Layout.Section>
 
@@ -530,6 +503,134 @@ export default function CreateCampaignPage() {
           </div>
         </Layout.Section>
       </Layout>
+
+      <Box paddingBlockStart="500" />
+
+      <Card padding="0">
+        <Box padding="400">
+          <SectionHeader
+            step="04"
+            title="Products and variants"
+            hint="Pick which variants this discount applies to. Pricing previews update live."
+          />
+        </Box>
+        <Divider />
+        <Box padding="400">
+          <BlockStack gap="400">
+            {(!startTime || (hasEndTime && !endTime)) && (
+              <Banner tone="info">
+                Set a start{hasEndTime ? " and end" : ""} time above to check for conflicts with other campaigns.
+              </Banner>
+            )}
+
+            {conflictsLoading && (
+              <InlineStack gap="200" blockAlign="center">
+                <Spinner size="small" />
+                <Text tone="subdued" variant="bodySm">Checking for conflicts…</Text>
+              </InlineStack>
+            )}
+
+            {!conflictsLoading && conflictCountOnPage > 0 && (
+              <Banner tone="warning">
+                {conflictCountOnPage} variant{conflictCountOnPage === 1 ? " is" : "s are"} unavailable on this page because they already belong to a campaign whose dates overlap with yours. Adjust your start or end time to free them up.
+              </Banner>
+            )}
+
+            <InlineGrid columns={{ xs: 1, md: 2 }} gap="400">
+              <Select
+                label="Filter by collection"
+                options={collectionOptions}
+                value={selectedCollection}
+                onChange={val => {
+                  setSelectedCollection(val);
+                  setCursor(null);
+                  setCursorStack([]);
+                }}
+              />
+              <TextField
+                label="Search products"
+                value={searchInput}
+                onChange={setSearchInput}
+                placeholder="Search by product name…"
+                autoComplete="off"
+                connectedRight={
+                  <Button onClick={() => setSearch(searchInput)}>Search</Button>
+                }
+              />
+            </InlineGrid>
+
+            <InlineStack gap="400" align="space-between" blockAlign="center" wrap>
+              <Checkbox
+                label="Show active products only"
+                checked={!showDraft}
+                onChange={(val) => setShowDraft(!val)}
+              />
+              <InlineStack gap="200">
+                {search && (
+                  <Button size="slim" onClick={() => { setSearch(""); setSearchInput(""); }}>
+                    Clear search
+                  </Button>
+                )}
+                <Button size="slim" onClick={selectAllOnPage}>
+                  Select all on this page
+                </Button>
+              </InlineStack>
+            </InlineStack>
+
+            {loading ? (
+              <Box padding="1600">
+                <BlockStack gap="200" align="center" inlineAlign="center">
+                  <Spinner />
+                  <Text tone="subdued">Loading products…</Text>
+                </BlockStack>
+              </Box>
+            ) : rows.length === 0 ? (
+              <EmptyState
+                heading="No products to show"
+                image="https://cdn.shopify.com/s/files/1/0262/4071/2726/files/emptystate-files.png"
+              >
+                <p>Try a different collection, clear the search, or include draft products.</p>
+              </EmptyState>
+            ) : (
+              <BlockStack gap="300">
+                <DataTable
+                  columnContentTypes={["text", "text", "text", "text", "text", "text"]}
+                  headings={[
+                    "",
+                    "Product",
+                    "Variant",
+                    "SKU",
+                    "Original",
+                    discountType === "percentage"
+                      ? `Sale (${discountValue || 0}% off)`
+                      : `Sale (£${discountValue || 0} off)`
+                  ]}
+                  rows={rows}
+                  increasedTableDensity
+                />
+                <InlineStack align="center">
+                  <Pagination
+                    hasPrevious={cursorStack.length > 0}
+                    onPrevious={() => {
+                      const newStack = [...cursorStack];
+                      const prev = newStack.pop();
+                      setCursorStack(newStack);
+                      setCursor(prev);
+                      fetchProducts(prev);
+                    }}
+                    hasNext={pageInfo?.hasNextPage}
+                    onNext={() => {
+                      setCursorStack(prev => [...prev, cursor]);
+                      setCursor(pageInfo.endCursor);
+                      fetchProducts(pageInfo.endCursor);
+                    }}
+                  />
+                </InlineStack>
+              </BlockStack>
+            )}
+          </BlockStack>
+        </Box>
+      </Card>
 
       <Box paddingBlockStart="800" />
     </Page>

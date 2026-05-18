@@ -64,6 +64,28 @@ async function createCampaign(req, res) {
     }
     const session = sessions[0];
 
+    // Reject the request if any selected variant overlaps an existing scheduled/active campaign.
+    const variantIds = variants.map(v => v.id);
+    const sqlStart = new Date(start_time).toISOString().slice(0, 19).replace("T", " ");
+    const sqlEnd = end_time ? new Date(end_time).toISOString().slice(0, 19).replace("T", " ") : null;
+    const [conflictRows] = await pool.query(
+      `SELECT cv.variant_id, c.name AS campaign_name
+       FROM campaign_variants cv
+       JOIN campaigns c ON c.id = cv.campaign_id
+       WHERE c.shop = ?
+         AND c.status IN ('scheduled', 'active')
+         AND cv.variant_id IN (?)
+         AND (c.end_time IS NULL OR c.end_time > ?)
+         AND (? IS NULL OR c.start_time < ?)`,
+      [shop, variantIds, sqlStart, sqlEnd, sqlEnd]
+    );
+    if (conflictRows.length > 0) {
+      return res.status(409).json({
+        error: `One or more variants already belong to an overlapping campaign (e.g. "${conflictRows[0].campaign_name}"). Adjust the dates or remove the conflicting variants.`,
+        conflicts: conflictRows
+      });
+    }
+
    const discountType = req.body.discount_type || "percentage";
 const discountVal = req.body.discount_value || 0;
 
@@ -286,6 +308,52 @@ async function getCampaigns(req, res) {
   }
 }
 
+async function getConflicts(req, res) {
+  try {
+    const { shop, start, end } = req.query;
+
+    if (!shop) return res.status(400).json({ error: "Shop is required" });
+    if (!start) return res.json({ conflicts: [] });
+
+    const newStart = new Date(start);
+    if (Number.isNaN(newStart.getTime())) {
+      return res.status(400).json({ error: "Invalid start time" });
+    }
+
+    let newEnd = null;
+    if (end) {
+      const parsed = new Date(end);
+      if (Number.isNaN(parsed.getTime())) {
+        return res.status(400).json({ error: "Invalid end time" });
+      }
+      newEnd = parsed;
+    }
+
+    // A variant is in conflict if it belongs to a scheduled/active campaign whose
+    // date range overlaps [newStart, newEnd]. Either side may be open-ended (null end_time).
+    // Overlap: existing.start < new.end AND existing.end > new.start (treating nulls as infinity).
+    const sqlStart = newStart.toISOString().slice(0, 19).replace("T", " ");
+    const sqlEnd = newEnd ? newEnd.toISOString().slice(0, 19).replace("T", " ") : null;
+
+    const [rows] = await pool.query(
+      `SELECT cv.variant_id, c.id AS campaign_id, c.name AS campaign_name,
+              c.start_time, c.end_time, c.status
+       FROM campaign_variants cv
+       JOIN campaigns c ON c.id = cv.campaign_id
+       WHERE c.shop = ?
+         AND c.status IN ('scheduled', 'active')
+         AND (c.end_time IS NULL OR c.end_time > ?)
+         AND (? IS NULL OR c.start_time < ?)`,
+      [shop, sqlStart, sqlEnd, sqlEnd]
+    );
+
+    res.json({ conflicts: rows });
+  } catch (error) {
+    console.error("❌ Get conflicts error:", error.message);
+    res.status(500).json({ error: error.message });
+  }
+}
+
 async function endCampaignNow(req, res) {
   try {
     const campaignId = req.params.id;
@@ -324,4 +392,4 @@ async function endCampaignNow(req, res) {
   }
 }
 
-module.exports = { createCampaign, startSale, endSale, getCampaigns, endCampaignNow };
+module.exports = { createCampaign, startSale, endSale, getCampaigns, endCampaignNow, getConflicts };
