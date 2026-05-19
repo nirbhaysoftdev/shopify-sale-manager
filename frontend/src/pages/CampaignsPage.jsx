@@ -7,6 +7,7 @@ import {
   EmptyState, Box, Divider
 } from "@shopify/polaris";
 import { BACKEND_URL, SHOP } from "../App";
+import { formatUkDate, formatUkTime } from "../utils/ukTime";
 
 export default function CampaignsPage() {
   const navigate = useNavigate();
@@ -125,13 +126,10 @@ export default function CampaignsPage() {
 
   function formatDate(value, fallback = null) {
     if (!value) return fallback;
-    const d = new Date(value);
-    const date = d.toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" });
-    const time = d.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
     return (
       <BlockStack gap="050">
-        <Text variant="bodyMd">{date}</Text>
-        <Text variant="bodySm" tone="subdued">{time}</Text>
+        <Text variant="bodyMd">{formatUkDate(value)}</Text>
+        <Text variant="bodySm" tone="subdued">{formatUkTime(value)} UK</Text>
       </BlockStack>
     );
   }

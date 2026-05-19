@@ -6,6 +6,9 @@ const pool = mysql.createPool({
   user: process.env.MYSQL_USER,
   password: process.env.MYSQL_PASSWORD,
   database: process.env.MYSQL_DATABASE,
+  // Store and read DATETIME values as UTC regardless of host TZ. The app
+  // formats to Europe/London at the edges; the DB is always UTC underneath.
+  timezone: "Z",
   waitForConnections: true,
   connectionLimit: 10,
   queueLimit: 0

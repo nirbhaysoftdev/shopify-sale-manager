@@ -8,6 +8,7 @@ import {
   EmptyState, InlineGrid, Tooltip
 } from "@shopify/polaris";
 import { BACKEND_URL, SHOP } from "../App";
+import { ukLocalToUtcIso, formatUkDateTime, nowUkLocal } from "../utils/ukTime";
 
 export default function CreateCampaignPage() {
   const navigate = useNavigate();
@@ -51,12 +52,21 @@ export default function CreateCampaignPage() {
       setConflicts({});
       return;
     }
+    if (hasEndTime && endTime && endTime <= startTime) {
+      setConflicts({});
+      return;
+    }
     const controller = new AbortController();
     const t = setTimeout(async () => {
       setConflictsLoading(true);
       try {
-        const params = new URLSearchParams({ shop: SHOP, start: startTime });
-        if (hasEndTime && endTime) params.append("end", endTime);
+        const params = new URLSearchParams({
+          shop: SHOP,
+          start: ukLocalToUtcIso(startTime),
+        });
+        if (hasEndTime && endTime) {
+          params.append("end", ukLocalToUtcIso(endTime));
+        }
         const res = await fetch(`${BACKEND_URL}/api/campaigns/conflicts?${params}`, {
           signal: controller.signal,
         });
@@ -176,6 +186,9 @@ export default function CreateCampaignPage() {
     if (selectedVariants.length === 0) return setMessage({ type: "critical", text: "Please select at least one variant" });
     if (!startTime) return setMessage({ type: "critical", text: "Please set a start time" });
     if (hasEndTime && !endTime) return setMessage({ type: "critical", text: "Please set an end time" });
+    if (hasEndTime && endTime <= startTime) {
+      return setMessage({ type: "critical", text: "End time must be after the start time." });
+    }
 
     setCreating(true);
 
@@ -185,8 +198,8 @@ export default function CreateCampaignPage() {
       discount_type: discountType,
       discount_percentage: discountType === "percentage" ? parseFloat(discountValue) : 0,
       discount_value: discountType === "fixed" ? parseFloat(discountValue) : 0,
-      start_time: startTime,
-      end_time: hasEndTime ? endTime : null,
+      start_time: ukLocalToUtcIso(startTime),
+      end_time: hasEndTime ? ukLocalToUtcIso(endTime) : null,
       variants: selectedVariants
     };
 
@@ -234,14 +247,13 @@ export default function CreateCampaignPage() {
 
   const formatScheduleLabel = (value) => {
     if (!value) return <Text tone="subdued">—</Text>;
-    const d = new Date(value);
+    const utcIso = ukLocalToUtcIso(value);
     return (
-      <Text variant="bodyMd">
-        {d.toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" })}{" · "}
-        {d.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })}
-      </Text>
+      <Text variant="bodyMd">{formatUkDateTime(utcIso)} <Text as="span" tone="subdued" variant="bodySm">UK</Text></Text>
     );
   };
+
+  const endBeforeStart = hasEndTime && !!startTime && !!endTime && endTime <= startTime;
 
   const conflictCountOnPage = products.reduce(
     (n, p) => n + p.variants.filter(v => conflicts[v.id]).length,
@@ -409,10 +421,14 @@ export default function CreateCampaignPage() {
 
             <Card>
               <BlockStack gap="400">
-                <SectionHeader step="03" title="Schedule" hint="Sales start and end automatically based on your store's timezone." />
+                <SectionHeader
+                  step="03"
+                  title="Schedule"
+                  hint="All times are UK time (Europe/London — BST in summer, GMT in winter)."
+                />
                 <InlineGrid columns={{ xs: 1, md: 2 }} gap="400">
                   <TextField
-                    label="Starts at"
+                    label="Starts at (UK time)"
                     value={startTime}
                     onChange={setStartTime}
                     type="datetime-local"
@@ -427,10 +443,12 @@ export default function CreateCampaignPage() {
                     />
                     {hasEndTime && (
                       <TextField
-                        label="Ends at"
+                        label="Ends at (UK time)"
                         value={endTime}
                         onChange={setEndTime}
                         type="datetime-local"
+                        min={startTime || undefined}
+                        error={endBeforeStart ? "End time must be after the start time." : undefined}
                         autoComplete="off"
                       />
                     )}
@@ -500,11 +518,13 @@ export default function CreateCampaignPage() {
                       fullWidth
                       onClick={handleCreate}
                       loading={creating}
-                      disabled={selectedVariants.length === 0}
+                      disabled={selectedVariants.length === 0 || endBeforeStart}
                     >
-                      {selectedVariants.length === 0
-                        ? "Select variants to continue"
-                        : `Create campaign (${selectedVariants.length})`}
+                      {endBeforeStart
+                        ? "End time must be after start"
+                        : selectedVariants.length === 0
+                          ? "Select variants to continue"
+                          : `Create campaign (${selectedVariants.length})`}
                     </Button>
                     {selectedVariants.length > 0 && (
                       <Button fullWidth variant="tertiary" onClick={() => setSelectedVariants([])}>

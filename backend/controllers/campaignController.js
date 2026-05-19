@@ -76,6 +76,22 @@ async function createCampaign(req, res) {
       return res.status(400).json({ error: "Missing required fields" });
     }
 
+    // The frontend sends UTC ISO timestamps. Reject anything we can't parse,
+    // and reject end <= start so the conflict window can't go negative.
+    const startDate = new Date(start_time);
+    const endDate = end_time ? new Date(end_time) : null;
+    if (Number.isNaN(startDate.getTime())) {
+      return res.status(400).json({ error: "Invalid start time" });
+    }
+    if (endDate && Number.isNaN(endDate.getTime())) {
+      return res.status(400).json({ error: "Invalid end time" });
+    }
+    if (endDate && endDate.getTime() <= startDate.getTime()) {
+      return res.status(400).json({ error: "End time must be after start time" });
+    }
+    const sqlStartTime = toSqlDateTime(startDate);
+    const sqlEndTime = endDate ? toSqlDateTime(endDate) : null;
+
     const sessions = await mysqlSessionStorage.findSessionsByShop(shop);
     if (!sessions || sessions.length === 0) {
       return res.status(401).json({ error: "No session found. Please reinstall the app." });
@@ -116,7 +132,7 @@ async function createCampaign(req, res) {
     const [result] = await pool.query(
       `INSERT INTO campaigns (name, shop, discount_percentage, discount_type, discount_value, status, start_time, end_time)
        VALUES (?, ?, ?, ?, ?, 'scheduled', ?, ?)`,
-      [name, shop, discount_percentage, discountType, discountVal, start_time, end_time || null]
+      [name, shop, discount_percentage, discountType, discountVal, sqlStartTime, sqlEndTime]
     );
 
     const campaignId = result.insertId;
@@ -133,7 +149,7 @@ async function createCampaign(req, res) {
     // — otherwise a campaign created during another active sale would snapshot
     // an already-discounted price as its base.
 
-    const startDelay = new Date(start_time).getTime() - Date.now();
+    const startDelay = startDate.getTime() - Date.now();
 
     if (startDelay > 0) {
       await scheduleSaleStart({ campaignId, shop }, startDelay);
@@ -142,8 +158,8 @@ async function createCampaign(req, res) {
       await startSale(campaignId, shop, session);
     }
 
-    if (end_time) {
-      const endDelay = new Date(end_time).getTime() - Date.now();
+    if (endDate) {
+      const endDelay = endDate.getTime() - Date.now();
       if (endDelay > 0) {
         await scheduleSaleEnd({ campaignId, shop }, endDelay);
         console.log(`✅ Sale end scheduled in ${Math.round(endDelay/1000)}s`);
