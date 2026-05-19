@@ -134,6 +134,15 @@ export default function CreateCampaignPage() {
     }
   }
 
+  // True base price for the discount. compareAtPrice (if positive) means the
+  // variant is already on sale by another mechanism, so its "real" original is
+  // the compareAt — discounting from the current price would compound discounts.
+  function effectiveBase(variant) {
+    const cap = parseFloat(variant.compareAtPrice);
+    if (variant.compareAtPrice && !Number.isNaN(cap) && cap > 0) return cap.toString();
+    return variant.price;
+  }
+
   function toggleVariant(variantId, productTitle, variantTitle, price) {
     if (conflicts[variantId]) return;
     setSelectedVariants(prev => {
@@ -151,7 +160,7 @@ export default function CreateCampaignPage() {
           id: v.id,
           productTitle: p.title,
           variantTitle: v.title,
-          price: v.price
+          price: effectiveBase(v)
         }))
     );
     setSelectedVariants(prev => {
@@ -249,6 +258,10 @@ export default function CreateCampaignPage() {
         ? `Booked in “${conflict.campaign_name}” (${new Date(conflict.start_time).toLocaleDateString("en-GB")}${conflict.end_time ? ` – ${new Date(conflict.end_time).toLocaleDateString("en-GB")}` : " – no end"})`
         : null;
 
+      const baseForDiscount = effectiveBase(variant);
+      const liveCompareAt = parseFloat(variant.compareAtPrice);
+      const isLiveOnSale = variant.compareAtPrice && !Number.isNaN(liveCompareAt) && liveCompareAt > 0;
+
       return [
         conflict ? (
           <Tooltip content={conflictLabel}>
@@ -264,7 +277,7 @@ export default function CreateCampaignPage() {
           <input
             type="checkbox"
             checked={isSelected}
-            onChange={() => toggleVariant(variant.id, product.title, variant.title, variant.price)}
+            onChange={() => toggleVariant(variant.id, product.title, variant.title, baseForDiscount)}
             style={{ cursor: "pointer", width: "16px", height: "16px", accentColor: "#005bd3" }}
           />
         ),
@@ -286,6 +299,11 @@ export default function CreateCampaignPage() {
                 <Badge tone={product.status === "ACTIVE" ? "success" : "info"} size="small">
                   {product.status === "ACTIVE" ? "Active" : "Draft"}
                 </Badge>
+                {isLiveOnSale && (
+                  <Tooltip content={`Currently priced at £${variant.price}; £${baseForDiscount} is the saved compare-at price.`}>
+                    <Badge tone="attention" size="small">Currently on sale</Badge>
+                  </Tooltip>
+                )}
                 {conflict && (
                   <Tooltip content={conflictLabel}>
                     <Badge tone="warning" size="small">In another campaign</Badge>
@@ -301,14 +319,23 @@ export default function CreateCampaignPage() {
           </Text>
         ),
         dim(<Text variant="bodySm" tone="subdued">{variant.sku || "—"}</Text>),
-        dim(<Text variant="bodyMd">£{variant.price}</Text>),
+        dim(
+          isLiveOnSale ? (
+            <BlockStack gap="050">
+              <Text variant="bodyMd" fontWeight="semibold">£{baseForDiscount}</Text>
+              <Text variant="bodySm" tone="subdued">Live: £{variant.price}</Text>
+            </BlockStack>
+          ) : (
+            <Text variant="bodyMd">£{variant.price}</Text>
+          )
+        ),
         dim(
           isSelected
             ? (
               <BlockStack gap="050">
-                <Text variant="bodyMd" tone="success" fontWeight="semibold">£{calculateSalePrice(variant.price)}</Text>
+                <Text variant="bodyMd" tone="success" fontWeight="semibold">£{calculateSalePrice(baseForDiscount)}</Text>
                 <Text variant="bodySm" tone="subdued">
-                  <span style={{ textDecoration: "line-through" }}>£{variant.price}</span>
+                  <span style={{ textDecoration: "line-through" }}>£{baseForDiscount}</span>
                 </Text>
               </BlockStack>
             )

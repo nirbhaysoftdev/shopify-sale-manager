@@ -3,6 +3,24 @@ const shopify = require("../services/shopifyService");
 const mysqlSessionStorage = require("../db/sessionStorage");
 const { scheduleSaleStart, scheduleSaleEnd } = require("../jobs/scheduler");
 
+const ONE_HOUR_MS = 60 * 60 * 1000;
+
+function toSqlDateTime(d) {
+  return d.toISOString().slice(0, 19).replace("T", " ");
+}
+
+// Expand the campaign window by 1 hour on each side. Two campaigns sharing a
+// variant must be at least an hour apart, otherwise the earlier one's restore
+// can race the later one's snapshot capture.
+function bufferedWindow(start_time, end_time) {
+  const start = new Date(start_time);
+  const end = end_time ? new Date(end_time) : null;
+  return {
+    startBuf: toSqlDateTime(new Date(start.getTime() - ONE_HOUR_MS)),
+    endBuf: end ? toSqlDateTime(new Date(end.getTime() + ONE_HOUR_MS)) : null,
+  };
+}
+
 async function getProductId(client, variantId) {
   const query = `
     query {
@@ -64,12 +82,14 @@ async function createCampaign(req, res) {
     }
     const session = sessions[0];
 
-    // Reject the request if any selected variant overlaps an existing scheduled/active campaign.
+    // Reject the request if any selected variant is in an overlapping campaign,
+    // buffered by 1 hour on both sides so back-to-back campaigns can't clobber
+    // each other's price snapshots before the previous one finishes restoring.
     const variantIds = variants.map(v => v.id);
-    const sqlStart = new Date(start_time).toISOString().slice(0, 19).replace("T", " ");
-    const sqlEnd = end_time ? new Date(end_time).toISOString().slice(0, 19).replace("T", " ") : null;
+    const { startBuf, endBuf } = bufferedWindow(start_time, end_time);
     const [conflictRows] = await pool.query(
-      `SELECT cv.variant_id, c.name AS campaign_name
+      `SELECT cv.variant_id, c.id AS campaign_id, c.name AS campaign_name,
+              c.start_time, c.end_time, c.status
        FROM campaign_variants cv
        JOIN campaigns c ON c.id = cv.campaign_id
        WHERE c.shop = ?
@@ -77,24 +97,27 @@ async function createCampaign(req, res) {
          AND cv.variant_id IN (?)
          AND (c.end_time IS NULL OR c.end_time > ?)
          AND (? IS NULL OR c.start_time < ?)`,
-      [shop, variantIds, sqlStart, sqlEnd, sqlEnd]
+      [shop, variantIds, startBuf, endBuf, endBuf]
     );
     if (conflictRows.length > 0) {
+      const first = conflictRows[0];
+      const endLabel = first.end_time
+        ? new Date(first.end_time).toISOString()
+        : "no end time";
       return res.status(409).json({
-        error: `One or more variants already belong to an overlapping campaign (e.g. "${conflictRows[0].campaign_name}"). Adjust the dates or remove the conflicting variants.`,
+        error: `One or more variants are in another campaign ("${first.campaign_name}", ends ${endLabel}). Campaigns sharing a variant must be at least 1 hour apart — adjust the dates or remove the conflicting variants.`,
         conflicts: conflictRows
       });
     }
 
-   const discountType = req.body.discount_type || "percentage";
-const discountVal = req.body.discount_value || 0;
+    const discountType = req.body.discount_type || "percentage";
+    const discountVal = req.body.discount_value || 0;
 
-const [result] = await pool.query(
-  `INSERT INTO campaigns (name, shop, discount_percentage, discount_type, discount_value, status, start_time, end_time)
-   VALUES (?, ?, ?, ?, ?, 'scheduled', ?, ?)`,
-  [name, shop, discount_percentage, discountType, discountVal, start_time, end_time || null]
-);
-
+    const [result] = await pool.query(
+      `INSERT INTO campaigns (name, shop, discount_percentage, discount_type, discount_value, status, start_time, end_time)
+       VALUES (?, ?, ?, ?, ?, 'scheduled', ?, ?)`,
+      [name, shop, discount_percentage, discountType, discountVal, start_time, end_time || null]
+    );
 
     const campaignId = result.insertId;
 
@@ -104,31 +127,11 @@ const [result] = await pool.query(
          VALUES (?, ?, ?)`,
         [campaignId, variant.id, variant.id]
       );
-
-      const originalPrice = parseFloat(variant.price);
-      const discountType = req.body.discount_type || "percentage";
-const discountVal = parseFloat(req.body.discount_value || 0);
-const salePrice = discountType === "fixed"
-  ? Math.max(0, originalPrice - discountVal)
-  : originalPrice - (originalPrice * discount_percentage / 100);
-
-  
-      await pool.query(
-        `INSERT INTO price_snapshots
-         (campaign_id, variant_id, product_title, variant_title, sku, original_price, sale_price, compare_at_price)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-        [
-          campaignId,
-          variant.id,
-          variant.productTitle,
-          variant.variantTitle,
-          variant.sku || "",
-          originalPrice,
-          salePrice.toFixed(2),
-          originalPrice
-        ]
-      );
     }
+    // Price snapshots are NOT created here. We defer them to startSale so the
+    // "original" reflects Shopify's live state at the moment the sale begins
+    // — otherwise a campaign created during another active sale would snapshot
+    // an already-discounted price as its base.
 
     const startDelay = new Date(start_time).getTime() - Date.now();
 
@@ -166,6 +169,23 @@ const salePrice = discountType === "fixed"
   }
 }
 
+async function fetchVariantLive(client, variantId) {
+  const query = `
+    query GetVariant($id: ID!) {
+      productVariant(id: $id) {
+        id
+        title
+        sku
+        price
+        compareAtPrice
+        product { id title }
+      }
+    }
+  `;
+  const res = await client.request(query, { variables: { id: variantId } });
+  return res.data?.productVariant || null;
+}
+
 async function startSale(campaignId, shop, session) {
   try {
     console.log(`🟢 Starting sale for campaign ${campaignId}`);
@@ -178,22 +198,72 @@ async function startSale(campaignId, shop, session) {
 
     const client = new shopify.clients.Graphql({ session });
 
-    const [snapshots] = await pool.query(
-      `SELECT * FROM price_snapshots WHERE campaign_id = ?`,
+    const [campaigns] = await pool.query(
+      `SELECT discount_type, discount_percentage, discount_value FROM campaigns WHERE id = ?`,
+      [campaignId]
+    );
+    if (campaigns.length === 0) throw new Error("Campaign not found");
+    const { discount_type, discount_percentage, discount_value } = campaigns[0];
+
+    // Snapshots may already exist if this campaign was retried — skip re-snapshotting them.
+    const [existingSnapshots] = await pool.query(
+      `SELECT variant_id FROM price_snapshots WHERE campaign_id = ?`,
+      [campaignId]
+    );
+    const alreadySnapped = new Set(existingSnapshots.map(s => s.variant_id));
+
+    const [variantRows] = await pool.query(
+      `SELECT variant_id FROM campaign_variants WHERE campaign_id = ?`,
       [campaignId]
     );
 
-    for (const snapshot of snapshots) {
+    let updated = 0;
+    for (const { variant_id } of variantRows) {
       try {
+        const live = await fetchVariantLive(client, variant_id);
+        if (!live) {
+          console.error(`❌ Variant ${variant_id} not found on Shopify`);
+          continue;
+        }
+
+        // True original = compareAtPrice if set (variant is currently on sale by another mechanism),
+        // otherwise the current price.
+        const livePrice = parseFloat(live.price);
+        const liveCompare = live.compareAtPrice ? parseFloat(live.compareAtPrice) : null;
+        const originalPrice = liveCompare && liveCompare > 0 ? liveCompare : livePrice;
+
+        const salePrice = discount_type === "fixed"
+          ? Math.max(0, originalPrice - parseFloat(discount_value))
+          : originalPrice - (originalPrice * parseFloat(discount_percentage) / 100);
+
+        if (!alreadySnapped.has(variant_id)) {
+          await pool.query(
+            `INSERT INTO price_snapshots
+             (campaign_id, variant_id, product_title, variant_title, sku, original_price, sale_price, compare_at_price)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+            [
+              campaignId,
+              variant_id,
+              live.product?.title || "",
+              live.title || "",
+              live.sku || "",
+              originalPrice,
+              salePrice.toFixed(2),
+              originalPrice,
+            ]
+          );
+        }
+
         await updateVariantPrice(
           client,
-          snapshot.variant_id,
-          snapshot.sale_price.toString(),
-          snapshot.original_price.toString()
+          variant_id,
+          salePrice.toFixed(2),
+          originalPrice.toString()
         );
-        console.log(`✅ Updated variant to £${snapshot.sale_price}`);
+        console.log(`✅ Snapshot+update variant ${variant_id}: £${originalPrice} → £${salePrice.toFixed(2)}`);
+        updated++;
       } catch (err) {
-        console.error(`❌ Failed to update variant:`, err.message);
+        console.error(`❌ Failed to start variant ${variant_id}:`, err.message);
       }
       await new Promise(r => setTimeout(r, 600));
     }
@@ -203,7 +273,7 @@ async function startSale(campaignId, shop, session) {
       [campaignId]
     );
 
-    console.log(`✅ Sale started for campaign ${campaignId} - ${snapshots.length} variants updated`);
+    console.log(`✅ Sale started for campaign ${campaignId} - ${updated}/${variantRows.length} variants updated`);
 
   } catch (error) {
     console.error(`❌ Start sale error for campaign ${campaignId}:`, error.message);
@@ -320,20 +390,17 @@ async function getConflicts(req, res) {
       return res.status(400).json({ error: "Invalid start time" });
     }
 
-    let newEnd = null;
     if (end) {
       const parsed = new Date(end);
       if (Number.isNaN(parsed.getTime())) {
         return res.status(400).json({ error: "Invalid end time" });
       }
-      newEnd = parsed;
     }
 
-    // A variant is in conflict if it belongs to a scheduled/active campaign whose
-    // date range overlaps [newStart, newEnd]. Either side may be open-ended (null end_time).
-    // Overlap: existing.start < new.end AND existing.end > new.start (treating nulls as infinity).
-    const sqlStart = newStart.toISOString().slice(0, 19).replace("T", " ");
-    const sqlEnd = newEnd ? newEnd.toISOString().slice(0, 19).replace("T", " ") : null;
+    // Conflict = an existing scheduled/active campaign whose window, buffered
+    // by 1 hour on each side, overlaps [newStart, newEnd]. The 1-hour gap is
+    // required so a previous sale's restore can finish before the next snapshot.
+    const { startBuf, endBuf } = bufferedWindow(start, end);
 
     const [rows] = await pool.query(
       `SELECT cv.variant_id, c.id AS campaign_id, c.name AS campaign_name,
@@ -344,7 +411,7 @@ async function getConflicts(req, res) {
          AND c.status IN ('scheduled', 'active')
          AND (c.end_time IS NULL OR c.end_time > ?)
          AND (? IS NULL OR c.start_time < ?)`,
-      [shop, sqlStart, sqlEnd, sqlEnd]
+      [shop, startBuf, endBuf, endBuf]
     );
 
     res.json({ conflicts: rows });
