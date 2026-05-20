@@ -8,7 +8,9 @@ import {
   EmptyState, InlineGrid, Tooltip
 } from "@shopify/polaris";
 import { BACKEND_URL, SHOP } from "../App";
+import { authFetch } from "../utils/authFetch";
 import { ukLocalToUtcIso, formatUkDateTime, nowUkLocal } from "../utils/ukTime";
+import { truncateName } from "../utils/truncate";
 
 export default function CreateCampaignPage() {
   const navigate = useNavigate();
@@ -67,7 +69,7 @@ export default function CreateCampaignPage() {
         if (hasEndTime && endTime) {
           params.append("end", ukLocalToUtcIso(endTime));
         }
-        const res = await fetch(`${BACKEND_URL}/api/campaigns/conflicts?${params}`, {
+        const res = await authFetch(`${BACKEND_URL}/api/campaigns/conflicts?${params}`, {
           signal: controller.signal,
         });
         const data = await res.json();
@@ -99,7 +101,7 @@ export default function CreateCampaignPage() {
 
   async function fetchCollections() {
     try {
-      const res = await fetch(`${BACKEND_URL}/api/collections?shop=${SHOP}`);
+      const res = await authFetch(`${BACKEND_URL}/api/collections?shop=${SHOP}`);
       const data = await res.json();
       if (data.collections) setCollections(data.collections);
     } catch (err) {
@@ -122,7 +124,7 @@ export default function CreateCampaignPage() {
         url = `${BACKEND_URL}/api/collections/${encodeURIComponent(selectedCollection)}/products?${params}`;
       }
 
-      const res = await fetch(url);
+      const res = await authFetch(url);
       const data = await res.json();
       if (data.products) {
         setProducts(data.products);
@@ -205,7 +207,7 @@ export default function CreateCampaignPage() {
 
     // Fire-and-forget: the server response is delivered to the campaigns page
     // through sessionStorage + a window event. The user moves on immediately.
-    fetch(`${BACKEND_URL}/api/campaigns`, {
+    authFetch(`${BACKEND_URL}/api/campaigns`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body)
@@ -306,7 +308,13 @@ export default function CreateCampaignPage() {
               />
             )}
             <BlockStack gap="050">
-              <Text variant="bodyMd" fontWeight="semibold">{product.title}</Text>
+              {(() => {
+                const { display, truncated } = truncateName(product.title);
+                const label = <Text variant="bodyMd" fontWeight="semibold">{display}</Text>;
+                return truncated
+                  ? <Tooltip content={product.title}>{label}</Tooltip>
+                  : label;
+              })()}
               <InlineStack gap="100">
                 <Badge tone={product.status === "ACTIVE" ? "success" : "info"} size="small">
                   {product.status === "ACTIVE" ? "Active" : "Draft"}

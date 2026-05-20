@@ -8,6 +8,7 @@ const path = require("path");
 const express = require("express");
 const cors = require("cors");
 const runMigrations = require("./db/migrations");
+const verifyShopifyAuth = require("./middleware/verifyShopifyAuth");
 
 const app = express();
 
@@ -16,8 +17,22 @@ app.use((req, res, next) => {
   next();
 });
 
+// Shopify admin loads embedded apps inside an iframe. Allow that, and only
+// that — every other site is blocked by frame-ancestors.
+app.use((req, res, next) => {
+  const shop = req.query?.shop;
+  const frameAncestors = shop && /^[a-z0-9-]+\.myshopify\.com$/i.test(shop)
+    ? `https://${shop} https://admin.shopify.com`
+    : "https://admin.shopify.com https://*.myshopify.com";
+  res.setHeader("Content-Security-Policy", `frame-ancestors ${frameAncestors};`);
+  next();
+});
+
+// API is same-origin with the React build, so cross-origin requests aren't
+// needed. Restrict CORS to our own host; reject anything else.
+const HOST = process.env.HOST || "";
 app.use(cors({
-  origin: "*",
+  origin: HOST ? [HOST] : false,
   methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization"]
 }));
@@ -25,9 +40,6 @@ app.use(cors({
 app.use(express.json());
 
 app.use("/auth", require("./routes/authRoutes"));
-app.use("/api/products", require("./routes/productRoutes"));
-app.use("/api/collections", require("./routes/collectionRoutes"));
-app.use("/api/campaigns", require("./routes/campaignRoutes"));
 
 app.get("/api/health", (req, res) => {
   res.json({
@@ -36,6 +48,11 @@ app.get("/api/health", (req, res) => {
     timestamp: new Date().toISOString()
   });
 });
+
+// All data routes require a verified Shopify session token.
+app.use("/api/products", verifyShopifyAuth, require("./routes/productRoutes"));
+app.use("/api/collections", verifyShopifyAuth, require("./routes/collectionRoutes"));
+app.use("/api/campaigns", verifyShopifyAuth, require("./routes/campaignRoutes"));
 
 const buildPath = path.join(__dirname, "..", "frontend", "build");
 app.use(express.static(buildPath));

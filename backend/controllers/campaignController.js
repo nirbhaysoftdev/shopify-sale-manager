@@ -98,6 +98,18 @@ async function createCampaign(req, res) {
     }
     const session = sessions[0];
 
+    // Names must be unique per shop so merchants can find a campaign by name.
+    // Not race-safe on its own; pair with a DB unique index if you need that.
+    const [dupName] = await pool.query(
+      `SELECT id FROM campaigns WHERE shop = ? AND name = ? LIMIT 1`,
+      [shop, name]
+    );
+    if (dupName.length > 0) {
+      return res.status(409).json({
+        error: `A campaign named "${name}" already exists. Choose a different name.`
+      });
+    }
+
     // Reject the request if any selected variant is in an overlapping campaign,
     // buffered by 1 hour on both sides so back-to-back campaigns can't clobber
     // each other's price snapshots before the previous one finishes restoring.
@@ -346,16 +358,18 @@ async function endSale(campaignId, shop) {
   }
 }
 
+const CAMPAIGNS_PAGE_SIZE = 20;
+
 async function getCampaigns(req, res) {
   try {
     const shop = req.query.shop;
     const status = req.query.status || "all";
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const offset = (page - 1) * CAMPAIGNS_PAGE_SIZE;
 
     if (!shop) return res.status(400).json({ error: "Shop is required" });
 
     let statusFilter = "";
-    const now = new Date().toISOString().slice(0, 19).replace("T", " ");
-
     if (status === "running") {
       statusFilter = `AND c.status = 'active'`;
     } else if (status === "upcoming") {
@@ -371,11 +385,11 @@ async function getCampaigns(req, res) {
        LEFT JOIN campaign_variants cv ON c.id = cv.campaign_id
        WHERE c.shop = ? ${statusFilter}
        GROUP BY c.id
-       ORDER BY c.created_at DESC`,
-      [shop]
+       ORDER BY c.created_at DESC
+       LIMIT ? OFFSET ?`,
+      [shop, CAMPAIGNS_PAGE_SIZE, offset]
     );
 
-    // Get counts for tabs
     const [counts] = await pool.query(
       `SELECT
         COUNT(*) as total,
@@ -386,7 +400,20 @@ async function getCampaigns(req, res) {
       [shop]
     );
 
-    res.json({ campaigns, counts: counts[0] });
+    const c = counts[0] || {};
+    const filterTotal = status === "running" ? Number(c.running || 0)
+      : status === "upcoming" ? Number(c.upcoming || 0)
+      : status === "ended" ? Number(c.ended || 0)
+      : Number(c.total || 0);
+
+    res.json({
+      campaigns,
+      counts: c,
+      page,
+      pageSize: CAMPAIGNS_PAGE_SIZE,
+      total: filterTotal,
+      totalPages: Math.max(1, Math.ceil(filterTotal / CAMPAIGNS_PAGE_SIZE))
+    });
 
   } catch (error) {
     console.error("❌ Get campaigns error:", error.message);
@@ -475,4 +502,109 @@ async function endCampaignNow(req, res) {
   }
 }
 
-module.exports = { createCampaign, startSale, endSale, getCampaigns, endCampaignNow, getConflicts };
+// Returns campaign + per-variant rows (product/variant/sku + original/sale prices).
+// Active/completed campaigns read from price_snapshots. Scheduled campaigns
+// don't have snapshots yet, so we bulk-fetch the variants from Shopify and
+// compute the prospective sale price from the campaign's discount config.
+async function getCampaignDetail(req, res) {
+  try {
+    const shop = req.shop || req.query.shop;
+    const campaignId = req.params.id;
+
+    if (!shop) return res.status(400).json({ error: "Shop is required" });
+
+    const [campaigns] = await pool.query(
+      `SELECT * FROM campaigns WHERE id = ? AND shop = ?`,
+      [campaignId, shop]
+    );
+    if (campaigns.length === 0) {
+      return res.status(404).json({ error: "Campaign not found" });
+    }
+    const campaign = campaigns[0];
+
+    const [snapshots] = await pool.query(
+      `SELECT * FROM price_snapshots WHERE campaign_id = ? ORDER BY product_title, variant_title`,
+      [campaignId]
+    );
+
+    if (snapshots.length > 0) {
+      const items = snapshots.map(s => {
+        const original = parseFloat(s.original_price);
+        const sale = parseFloat(s.sale_price);
+        return {
+          variant_id: s.variant_id,
+          product_title: s.product_title || "",
+          variant_title: s.variant_title || "",
+          sku: s.sku || "",
+          original_price: original,
+          sale_price: sale,
+          discount_amount: parseFloat((original - sale).toFixed(2)),
+          is_restored: !!s.is_restored,
+        };
+      });
+      return res.json({ campaign, items, source: "snapshot" });
+    }
+
+    const [variantRows] = await pool.query(
+      `SELECT variant_id FROM campaign_variants WHERE campaign_id = ?`,
+      [campaignId]
+    );
+    if (variantRows.length === 0) {
+      return res.json({ campaign, items: [], source: "empty" });
+    }
+
+    const session = req.shopifySession
+      || (await mysqlSessionStorage.findSessionsByShop(shop))[0];
+    if (!session) {
+      return res.status(401).json({ error: "No session found" });
+    }
+    const client = new shopify.clients.Graphql({ session });
+
+    const ids = variantRows.map(v => v.variant_id);
+    const query = `
+      query GetVariants($ids: [ID!]!) {
+        nodes(ids: $ids) {
+          ... on ProductVariant {
+            id
+            title
+            sku
+            price
+            compareAtPrice
+            product { title }
+          }
+        }
+      }
+    `;
+    const response = await client.request(query, { variables: { ids } });
+    const nodes = (response.data?.nodes || []).filter(Boolean);
+
+    const items = nodes.map(n => {
+      const livePrice = parseFloat(n.price);
+      const liveCompare = n.compareAtPrice ? parseFloat(n.compareAtPrice) : null;
+      const original = liveCompare && liveCompare > 0 ? liveCompare : livePrice;
+      const sale = campaign.discount_type === "fixed"
+        ? Math.max(0, original - parseFloat(campaign.discount_value))
+        : original - (original * parseFloat(campaign.discount_percentage) / 100);
+      const saleRounded = parseFloat(sale.toFixed(2));
+      return {
+        variant_id: n.id,
+        product_title: n.product?.title || "",
+        variant_title: n.title || "",
+        sku: n.sku || "",
+        original_price: original,
+        sale_price: saleRounded,
+        discount_amount: parseFloat((original - saleRounded).toFixed(2)),
+        is_restored: false,
+      };
+    });
+
+    items.sort((a, b) => (a.product_title + a.variant_title).localeCompare(b.product_title + b.variant_title));
+
+    res.json({ campaign, items, source: "live" });
+  } catch (error) {
+    console.error("❌ Get campaign detail error:", error.message);
+    res.status(500).json({ error: error.message });
+  }
+}
+
+module.exports = { createCampaign, startSale, endSale, getCampaigns, endCampaignNow, getConflicts, getCampaignDetail };
