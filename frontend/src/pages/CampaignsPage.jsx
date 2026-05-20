@@ -151,20 +151,17 @@ export default function CampaignsPage() {
     <Badge tone="info">{`${campaign.variant_count || 0} variants`}</Badge>,
     formatDate(campaign.start_time),
     formatDate(campaign.end_time, <Text tone="subdued">No end time</Text>),
-    <InlineStack gap="200">
-      <Button size="slim" onClick={() => setViewCampaign(campaign)}>View</Button>
-      {(campaign.status === "active" || campaign.status === "scheduled") && (
-        <Button
-          tone="critical"
-          variant="plain"
-          size="slim"
-          loading={endingCampaign === campaign.id}
-          onClick={() => setConfirmEndModal(campaign)}
-        >
-          End now
-        </Button>
-      )}
-    </InlineStack>
+    (campaign.status === "active" || campaign.status === "scheduled") ? (
+      <Button
+        tone="critical"
+        variant="plain"
+        size="slim"
+        loading={endingCampaign === campaign.id}
+        onClick={() => setConfirmEndModal(campaign)}
+      >
+        End now
+      </Button>
+    ) : <Text tone="subdued">—</Text>
   ]);
 
   return (
